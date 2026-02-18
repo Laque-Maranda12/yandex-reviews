@@ -1,0 +1,14 @@
+.git
+node_modules
+vendor
+public/build
+.env
+.env.backup
+.env.production
+storage/logs/*
+storage/framework/sessions/*
+storage/framework/cache/data/*
+*.md
+.idea
+.vscode
+.fleet

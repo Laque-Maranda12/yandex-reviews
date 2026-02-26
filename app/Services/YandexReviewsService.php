@@ -341,8 +341,14 @@ class YandexReviewsService
             if (empty($apiResult['organization_name']) && !empty($embeddedData['organization_name'])) {
                 $apiResult['organization_name'] = $embeddedData['organization_name'];
             }
-            if (empty($apiResult['rating']) && !empty($embeddedData['rating'])) {
+            // Always prefer embedded HTML rating — it's the real org rating shown on the
+            // Yandex Maps page, whereas the API may return a per-page or per-filter rating.
+            if (!empty($embeddedData['rating'])) {
                 $apiResult['rating'] = $embeddedData['rating'];
+            }
+            // Also prefer embedded total_reviews when available (the real Yandex total)
+            if (!empty($embeddedData['total_reviews']) && $embeddedData['total_reviews'] > 0) {
+                $apiResult['total_reviews'] = max($apiResult['total_reviews'] ?? 0, $embeddedData['total_reviews']);
             }
 
             // Merge embedded HTML reviews with API reviews to maximize coverage
@@ -1608,8 +1614,39 @@ class YandexReviewsService
         if (preg_match('/"aggregateRating"\s*:\s*(\{[^}]+\})/s', $html, $matches)) {
             $ratingData = json_decode($matches[1], true);
             if ($ratingData) {
-                $result['rating'] = floatval($ratingData['ratingValue'] ?? 0);
-                $result['total_reviews'] = intval($ratingData['reviewCount'] ?? $ratingData['ratingCount'] ?? 0);
+                $val = floatval($ratingData['ratingValue'] ?? 0);
+                if ($val >= 1.0 && $val <= 5.0) {
+                    $result['rating'] = $result['rating'] ?? $val;
+                }
+                $result['total_reviews'] = max(
+                    $result['total_reviews'],
+                    intval($ratingData['reviewCount'] ?? $ratingData['ratingCount'] ?? 0)
+                );
+            }
+        }
+
+        // Strategy 6b: Extract rating from HTML DOM elements (Yandex Maps page shows rating in specific elements)
+        if (!$result['rating']) {
+            $ratingPatterns = [
+                // Yandex Maps org rating badge text (e.g. "4.3")
+                '/class="[^"]*business-rating-badge-view__rating-text[^"]*"[^>]*>\s*([\d][.,]\d)\s*</si',
+                '/class="[^"]*orgpage-rating-view__rating[^"]*"[^>]*>\s*([\d][.,]\d)\s*</si',
+                '/class="[^"]*rating-badge[^"]*"[^>]*>\s*([\d][.,]\d)\s*</si',
+                // Generic rating value in meta tags
+                '/<meta[^>]+itemprop="ratingValue"[^>]+content="([\d][.,]\d+)"[^>]*>/si',
+                '/<meta[^>]+content="([\d][.,]\d+)"[^>]+itemprop="ratingValue"[^>]*>/si',
+                // Rating in aria-label: "Рейтинг 4.3 из 5"
+                '/aria-label="[^"]*?(\d[.,]\d)\s*(?:из|\/)\s*5[^"]*"/si',
+            ];
+            foreach ($ratingPatterns as $pattern) {
+                if (preg_match($pattern, $html, $m)) {
+                    $val = floatval(str_replace(',', '.', $m[1]));
+                    if ($val >= 1.0 && $val <= 5.0) {
+                        $result['rating'] = $val;
+                        Log::info('Extracted rating from HTML DOM pattern', ['rating' => $val]);
+                        break;
+                    }
+                }
             }
         }
 
@@ -1674,6 +1711,78 @@ class YandexReviewsService
                 continue;
             }
         }
+
+        // Extract organization rating from DOM
+        $ratingSelectors = [
+            '.business-rating-badge-view__rating-text',
+            '[class*="orgpage-rating-view__rating"]',
+            '[class*="business-rating-badge-view__rating"]',
+            '[class*="rating-badge"] [class*="rating-text"]',
+            '[class*="rating-value"]',
+        ];
+        foreach ($ratingSelectors as $selector) {
+            try {
+                $ratingNode = $crawler->filter($selector);
+                if ($ratingNode->count() > 0) {
+                    $ratingText = trim($ratingNode->first()->text(''));
+                    $ratingText = str_replace(',', '.', $ratingText);
+                    if (is_numeric($ratingText)) {
+                        $val = floatval($ratingText);
+                        if ($val >= 1.0 && $val <= 5.0) {
+                            $result['rating'] = $val;
+                            break;
+                        }
+                    }
+                }
+            } catch (\Exception $e) {
+                continue;
+            }
+        }
+
+        // Extract total reviews count from DOM
+        if (!$result['total_reviews']) {
+            $countSelectors = [
+                '[class*="business-rating-badge-view__rating-count"]',
+                '[class*="business-header-rating-view__text"]',
+                '[class*="rating-count"]',
+                '[class*="reviews-count"]',
+            ];
+            foreach ($countSelectors as $selector) {
+                try {
+                    $countNode = $crawler->filter($selector);
+                    if ($countNode->count() > 0) {
+                        $countText = trim($countNode->first()->text(''));
+                        if (preg_match('/(\d[\d\s]*\d|\d+)/u', $countText, $cm)) {
+                            $count = intval(preg_replace('/\s/', '', $cm[1]));
+                            if ($count > 0) {
+                                $result['total_reviews'] = $count;
+                                break;
+                            }
+                        }
+                    }
+                } catch (\Exception $e) {
+                    continue;
+                }
+            }
+        }
+
+        // Also try meta/itemprop
+        try {
+            $metaRating = $crawler->filter('[itemprop="ratingValue"]');
+            if ($metaRating->count() > 0 && !$result['rating']) {
+                $val = floatval($metaRating->first()->attr('content') ?? $metaRating->first()->text(''));
+                if ($val >= 1.0 && $val <= 5.0) {
+                    $result['rating'] = $val;
+                }
+            }
+            $metaCount = $crawler->filter('[itemprop="reviewCount"]');
+            if ($metaCount->count() > 0 && !$result['total_reviews']) {
+                $count = intval($metaCount->first()->attr('content') ?? $metaCount->first()->text(''));
+                if ($count > 0) {
+                    $result['total_reviews'] = $count;
+                }
+            }
+        } catch (\Exception $e) {}
 
         // Parse reviews with expanded selectors
         $reviewSelectors = [
@@ -2480,7 +2589,22 @@ class YandexReviewsService
 
             $rating = null;
             if (isset($data['rating']) && $data['rating'] > 0) {
-                $rating = round(floatval($data['rating']), 2);
+                $rating = round(floatval($data['rating']), 1);
+            }
+
+            // Fallback: try DOM parsing if extractFromHtml didn't find the rating
+            if ($rating === null) {
+                try {
+                    $domData = $this->parseHtmlDom($html, $orgId);
+                    if (isset($domData['rating']) && $domData['rating'] > 0) {
+                        $rating = round(floatval($domData['rating']), 1);
+                    }
+                    if ($domData['total_reviews'] > intval($data['total_reviews'] ?? 0)) {
+                        $data['total_reviews'] = $domData['total_reviews'];
+                    }
+                } catch (\Exception $e) {
+                    Log::warning('DOM rating fallback failed: ' . $e->getMessage());
+                }
             }
 
             $totalReviews = intval($data['total_reviews'] ?? 0);
@@ -2540,18 +2664,20 @@ class YandexReviewsService
             }
         });
 
-        // Rating priority: use Yandex's reported rating (accurate across ALL reviews),
+        // Rating priority: use Yandex's reported rating from the page (the real org rating),
         // only fall back to computed average if Yandex didn't provide one
         $rating = null;
         if (isset($data['rating']) && $data['rating'] !== null && $data['rating'] > 0) {
-            $rating = round(floatval($data['rating']), 2);
+            $rating = round(floatval($data['rating']), 1);
         }
         if ($rating === null && $source->reviews()->count() > 0) {
-            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 2);
+            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 1);
         }
 
-        // total_reviews: use actual count of reviews stored in DB
-        $totalReviews = $source->reviews()->count();
+        // total_reviews: prefer Yandex-reported total (real count), fallback to DB count
+        $yandexTotal = intval($data['total_reviews'] ?? 0);
+        $dbCount = $source->reviews()->count();
+        $totalReviews = max($yandexTotal, $dbCount);
 
         $source->update([
             'organization_name' => $data['organization_name'] ?? $source->organization_name,
@@ -2614,17 +2740,20 @@ class YandexReviewsService
             'total_fetched' => count($data['reviews']),
         ]);
 
-        // Update rating and count
+        // Rating priority: use Yandex's reported rating from the page (the real org rating),
+        // only fall back to computed average if Yandex didn't provide one
         $rating = null;
         if (isset($data['rating']) && $data['rating'] !== null && $data['rating'] > 0) {
-            $rating = round(floatval($data['rating']), 2);
+            $rating = round(floatval($data['rating']), 1);
         }
         if ($rating === null && $source->reviews()->count() > 0) {
-            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 2);
+            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 1);
         }
 
-        // total_reviews: use actual count of reviews stored in DB
-        $totalReviews = $source->reviews()->count();
+        // total_reviews: prefer Yandex-reported total (real count), fallback to DB count
+        $yandexTotal = intval($data['total_reviews'] ?? 0);
+        $dbCount = $source->reviews()->count();
+        $totalReviews = max($yandexTotal, $dbCount);
 
         $source->update([
             'organization_name' => $data['organization_name'] ?? $source->organization_name,

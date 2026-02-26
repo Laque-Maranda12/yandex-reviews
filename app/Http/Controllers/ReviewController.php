@@ -44,18 +44,22 @@ class ReviewController extends Controller
             $sortDirection = 'desc';
         }
 
-        $reviews = $source->reviews()
-            ->orderBy($sortField, $sortDirection)
-            ->paginate($perPage);
+        $query = $source->reviews();
 
+        // When sorting by published_at, put reviews with null dates last
+        if ($sortField === 'published_at') {
+            $query->orderByRaw('published_at IS NULL ASC')
+                  ->orderBy('published_at', $sortDirection);
+        } else {
+            $query->orderBy($sortField, $sortDirection);
+        }
+
+        $reviews = $query->paginate($perPage);
+
+        // Always use the Yandex-reported rating (not computed average)
         $rating = $source->rating;
         $dbCount = $source->reviews()->count();
         $totalReviews = max($source->total_reviews, $dbCount);
-
-        // Fallback: compute average rating from reviews if source rating is missing
-        if (!$rating && $totalReviews > 0) {
-            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 2);
-        }
 
         return response()->json([
             'reviews' => $reviews->items(),

@@ -1744,7 +1744,7 @@ class YandexReviewsService
                         'text' => $review['reviewBody'] ?? $review['description'] ?? '',
                         'branch_name' => null,
                         'published_at' => isset($review['datePublished'])
-                            ? Carbon::parse($review['datePublished']) : now(),
+                            ? Carbon::parse($review['datePublished']) : null,
                         'yandex_id' => null,
                     ];
                 }
@@ -2087,7 +2087,7 @@ class YandexReviewsService
     /**
      * Extract date from a review DOM node.
      */
-    private function extractDateFromNode(Crawler $node): Carbon
+    private function extractDateFromNode(Crawler $node): ?Carbon
     {
         // Strategy 1: <time datetime="...">
         try {
@@ -2123,7 +2123,8 @@ class YandexReviewsService
                 if ($dateNode->count() > 0) {
                     $dateText = trim($dateNode->first()->text(''));
                     if ($dateText) {
-                        return $this->parseRussianDate($dateText);
+                        $parsed = $this->parseRussianDate($dateText);
+                        if ($parsed !== null) return $parsed;
                     }
                 }
             } catch (\Exception $e) {
@@ -2131,7 +2132,7 @@ class YandexReviewsService
             }
         }
 
-        return now();
+        return null;
     }
 
     /**
@@ -2300,7 +2301,7 @@ class YandexReviewsService
     /**
      * Extract date from review data, trying multiple possible keys.
      */
-    private function extractDate(array $review): Carbon
+    private function extractDate(array $review): ?Carbon
     {
         $dateKeys = [
             'updatedTime', 'time', 'date', 'createdTime', 'publishedTime',
@@ -2325,7 +2326,9 @@ class YandexReviewsService
                 if (is_string($val)) {
                     try {
                         if (preg_match('/[а-яА-Я]/u', $val)) {
-                            return $this->parseRussianDate($val);
+                            $parsed = $this->parseRussianDate($val);
+                            if ($parsed !== null) return $parsed;
+                            continue;
                         }
                         return Carbon::parse($val);
                     } catch (\Exception $e) {
@@ -2335,13 +2338,13 @@ class YandexReviewsService
             }
         }
 
-        return now();
+        return null;
     }
 
     /**
      * Parse Russian date string including relative dates.
      */
-    private function parseRussianDate(string $dateStr): Carbon
+    private function parseRussianDate(string $dateStr): ?Carbon
     {
         $dateStr = mb_strtolower(trim($dateStr));
 
@@ -2373,7 +2376,7 @@ class YandexReviewsService
                 'неделю' => Carbon::now()->subWeek(),
                 'месяц' => Carbon::now()->subMonth(),
                 'год' => Carbon::now()->subYear(),
-                default => Carbon::now(),
+                default => null,
             };
         }
 
@@ -2403,7 +2406,7 @@ class YandexReviewsService
         try {
             return Carbon::parse($dateStr);
         } catch (\Exception $e) {
-            return now();
+            return null;
         }
     }
 
@@ -2540,14 +2543,10 @@ class YandexReviewsService
             }
         });
 
-        // Rating priority: use Yandex's reported rating (accurate across ALL reviews),
-        // only fall back to computed average if Yandex didn't provide one
+        // Always use Yandex-reported rating — never compute average from stored reviews
         $rating = null;
         if (isset($data['rating']) && $data['rating'] !== null && $data['rating'] > 0) {
             $rating = round(floatval($data['rating']), 2);
-        }
-        if ($rating === null && $source->reviews()->count() > 0) {
-            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 2);
         }
 
         // total_reviews: use actual count of reviews stored in DB
@@ -2555,7 +2554,7 @@ class YandexReviewsService
 
         $source->update([
             'organization_name' => $data['organization_name'] ?? $source->organization_name,
-            'rating' => $rating,
+            'rating' => $rating ?? $source->rating,
             'total_reviews' => $totalReviews,
             'last_synced_at' => now(),
         ]);
@@ -2614,13 +2613,10 @@ class YandexReviewsService
             'total_fetched' => count($data['reviews']),
         ]);
 
-        // Update rating and count
+        // Always use Yandex-reported rating — never compute average from stored reviews
         $rating = null;
         if (isset($data['rating']) && $data['rating'] !== null && $data['rating'] > 0) {
             $rating = round(floatval($data['rating']), 2);
-        }
-        if ($rating === null && $source->reviews()->count() > 0) {
-            $rating = round($source->reviews()->whereNotNull('rating')->avg('rating'), 2);
         }
 
         // total_reviews: use actual count of reviews stored in DB
@@ -2628,7 +2624,7 @@ class YandexReviewsService
 
         $source->update([
             'organization_name' => $data['organization_name'] ?? $source->organization_name,
-            'rating' => $rating,
+            'rating' => $rating ?? $source->rating,
             'total_reviews' => $totalReviews,
             'last_synced_at' => now(),
         ]);

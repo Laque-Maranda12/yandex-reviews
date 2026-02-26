@@ -2436,6 +2436,73 @@ class YandexReviewsService
     }
 
     /**
+     * Lightweight rating refresh: visits the org page and extracts
+     * only the current rating and total review count from HTML.
+     * Does NOT fetch individual reviews.
+     */
+    public function fetchRating(YandexSource $source): ?array
+    {
+        $orgId = $this->parseOrganizationId($source->url);
+        if (!$orgId) {
+            return null;
+        }
+
+        $this->detectDomain($source->url);
+
+        $url = $source->url;
+        if (!str_contains($url, '/reviews')) {
+            $url = rtrim($url, '/') . '/reviews/';
+        }
+
+        $headers = [
+            'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Encoding' => 'gzip, deflate, br',
+            'Cache-Control' => 'no-cache',
+            'Sec-Fetch-Dest' => 'document',
+            'Sec-Fetch-Mode' => 'navigate',
+            'Sec-Fetch-Site' => 'none',
+            'Upgrade-Insecure-Requests' => '1',
+        ];
+        if ($this->secChUa) {
+            $headers['Sec-Ch-Ua'] = $this->secChUa;
+            $headers['Sec-Ch-Ua-Mobile'] = '?0';
+            $headers['Sec-Ch-Ua-Platform'] = $this->secChUaPlatform;
+        }
+
+        try {
+            $response = $this->httpGet($url, [], $headers, 15);
+            if (!$response || !$response->successful()) {
+                return null;
+            }
+
+            $html = $response->body();
+            $data = $this->extractFromHtml($html, $orgId);
+
+            $rating = null;
+            if (isset($data['rating']) && $data['rating'] > 0) {
+                $rating = round(floatval($data['rating']), 2);
+            }
+
+            $totalReviews = intval($data['total_reviews'] ?? 0);
+
+            if ($rating !== null) {
+                $source->update([
+                    'rating' => $rating,
+                    'total_reviews' => max($totalReviews, $source->reviews()->count()),
+                ]);
+            }
+
+            return [
+                'rating' => $rating ?? $source->rating,
+                'total_reviews' => max($totalReviews, $source->reviews()->count()),
+            ];
+        } catch (\Exception $e) {
+            Log::warning('fetchRating failed: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
      * Full sync: delete old reviews and fetch all from scratch.
      * Uses a transaction to prevent data loss if something fails mid-sync.
      */

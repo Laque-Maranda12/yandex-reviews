@@ -20,4 +20,5 @@ Route::middleware('auth:sanctum')->group(function () {
     // Reviews
     Route::get('/reviews', [ReviewController::class, 'index']);
     Route::post('/reviews/sync', [ReviewController::class, 'sync']);
+    Route::post('/reviews/refresh-rating', [ReviewController::class, 'refreshRating']);
 });

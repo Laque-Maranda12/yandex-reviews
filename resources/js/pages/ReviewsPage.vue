@@ -26,6 +26,24 @@
       <div class="flex gap-8">
         <!-- Reviews list -->
         <div class="flex-1">
+          <!-- Sort controls -->
+          <div class="flex items-center gap-3 mb-4">
+            <span class="text-sm text-gray-500">Сортировка:</span>
+            <div class="flex gap-1.5">
+              <button
+                v-for="option in sortOptions"
+                :key="option.value"
+                @click="changeSort(option.value)"
+                class="px-3 py-1.5 text-sm rounded-lg border transition-colors"
+                :class="currentSort === option.value
+                  ? 'bg-primary text-white border-primary'
+                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50 hover:border-gray-400'"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
+
           <!-- Loading -->
           <div v-if="loading" class="space-y-4">
             <div v-for="i in 3" :key="i" class="bg-white rounded-xl border border-gray-200 p-6 animate-pulse">
@@ -125,8 +143,8 @@
         <div v-if="source" class="w-64 flex-shrink-0">
           <div class="bg-white rounded-xl border border-gray-200 p-6 sticky top-8">
             <!-- Rating number & stars -->
-            <div v-if="source.rating" class="flex items-center gap-3 mb-4">
-              <span class="text-5xl font-bold text-gray-900">{{ Number(source.rating).toFixed(1) }}</span>
+            <div v-if="displayRating" class="flex items-center gap-3 mb-4">
+              <span class="text-5xl font-bold text-gray-900">{{ Number(displayRating).toFixed(1) }}</span>
               <div class="flex flex-col gap-1">
                 <div class="flex gap-0.5">
                   <svg
@@ -135,15 +153,24 @@
                     width="22"
                     height="22"
                     viewBox="0 0 20 20"
-                    :fill="star <= Math.round(source.rating) ? '#F5A623' : '#E0E0E0'"
+                    :fill="star <= Math.round(displayRating) ? '#F5A623' : '#E0E0E0'"
                   >
                     <path d="M10 1l2.39 4.84 5.34.78-3.87 3.77.91 5.32L10 13.27l-4.77 2.51.91-5.32L2.27 6.69l5.34-.78L10 1z"/>
                   </svg>
                 </div>
               </div>
+              <!-- Refresh indicator -->
+              <svg
+                v-if="refreshingRating"
+                width="14" height="14" viewBox="0 0 16 16" fill="none"
+                class="animate-spin ml-1 text-gray-400"
+              >
+                <path d="M14 8A6 6 0 1 1 8 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
             </div>
             <div v-else class="mb-4">
-              <span class="text-2xl font-bold text-gray-400">Нет оценки</span>
+              <span v-if="refreshingRating" class="text-sm text-gray-400">Загрузка рейтинга...</span>
+              <span v-else class="text-2xl font-bold text-gray-400">Нет оценки</span>
             </div>
 
             <!-- Total reviews count -->
@@ -155,6 +182,11 @@
               <template v-else>
                 Всего отзывов: <span class="font-semibold text-gray-700">{{ formatNumber(meta.total || source.total_reviews) }}</span>
               </template>
+            </p>
+
+            <!-- Last sync time -->
+            <p v-if="source.last_synced_at" class="text-xs text-gray-400 mt-1">
+              Обновлено: {{ formatRelativeTime(source.last_synced_at) }}
             </p>
 
             <!-- Sync button -->
@@ -189,15 +221,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import http from '../http';
 
 const reviews = ref([]);
 const source = ref(null);
 const loading = ref(true);
 const syncing = ref(false);
+const refreshingRating = ref(false);
 const syncMessage = ref('');
 const syncError = ref(false);
+const currentSort = ref('newest');
 const meta = ref({
   current_page: 1,
   last_page: 1,
@@ -205,21 +239,41 @@ const meta = ref({
   total: 0,
 });
 
+const sortOptions = [
+  { value: 'newest', label: 'Сначала новые' },
+  { value: 'oldest', label: 'Сначала старые' },
+  { value: 'rating_high', label: 'Высокий рейтинг' },
+  { value: 'rating_low', label: 'Низкий рейтинг' },
+];
+
+const sortParams = {
+  newest: { sort: 'published_at', direction: 'desc' },
+  oldest: { sort: 'published_at', direction: 'asc' },
+  rating_high: { sort: 'rating', direction: 'desc' },
+  rating_low: { sort: 'rating', direction: 'asc' },
+};
+
+const displayRating = computed(() => {
+  return source.value?.rating || null;
+});
+
 onMounted(() => {
   fetchReviews(1);
+  refreshRating();
 });
 
 async function fetchReviews(page = 1) {
   loading.value = true;
   try {
+    const params = sortParams[currentSort.value] || sortParams.newest;
     const { data } = await http.get('/reviews', {
       params: {
         page,
-        sort: 'published_at',
-        direction: 'desc',
+        sort: params.sort,
+        direction: params.direction,
         per_page: 50,
       },
-      timeout: 30000, // 30s timeout for reading reviews
+      timeout: 30000,
     });
     reviews.value = data.reviews;
     source.value = data.source;
@@ -231,18 +285,44 @@ async function fetchReviews(page = 1) {
   }
 }
 
+async function refreshRating() {
+  refreshingRating.value = true;
+  try {
+    const { data } = await http.post('/reviews/refresh-rating', {}, {
+      timeout: 20000,
+    });
+    if (data.rating && source.value) {
+      source.value = {
+        ...source.value,
+        rating: data.rating,
+        total_reviews: data.total_reviews || source.value.total_reviews,
+      };
+    }
+  } catch (e) {
+    // Silent fail — we still have the stored rating
+    console.warn('Rating refresh failed:', e);
+  } finally {
+    refreshingRating.value = false;
+  }
+}
+
+function changeSort(sortValue) {
+  if (currentSort.value === sortValue) return;
+  currentSort.value = sortValue;
+  fetchReviews(1);
+}
+
 async function syncReviews() {
-  if (syncing.value) return; // Guard against double-click
+  if (syncing.value) return;
   syncing.value = true;
   syncMessage.value = '';
   syncError.value = false;
   try {
     const { data } = await http.post('/reviews/sync', {}, {
-      timeout: 300000, // 5 min max — matches backend fetch timeout
+      timeout: 300000,
     });
     syncMessage.value = data.message || 'Отзывы обновлены!';
     syncError.value = false;
-    // Reload reviews after sync
     await fetchReviews(1);
   } catch (e) {
     if (e.code === 'ECONNABORTED') {
@@ -255,7 +335,6 @@ async function syncReviews() {
     syncError.value = true;
   } finally {
     syncing.value = false;
-    // Clear message after 10 seconds
     setTimeout(() => { syncMessage.value = ''; }, 10000);
   }
 }
@@ -300,6 +379,22 @@ function formatDate(dateStr) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function formatRelativeTime(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now - d;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMin < 1) return 'только что';
+  if (diffMin < 60) return `${diffMin} мин. назад`;
+  if (diffHours < 24) return `${diffHours} ч. назад`;
+  if (diffDays < 7) return `${diffDays} дн. назад`;
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
 function formatNumber(num) {

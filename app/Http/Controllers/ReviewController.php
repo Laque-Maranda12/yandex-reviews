@@ -64,6 +64,7 @@ class ReviewController extends Controller
                 'rating' => $rating,
                 'total_reviews' => $totalReviews,
                 'url' => $source->url,
+                'last_synced_at' => $source->last_synced_at?->toIso8601String(),
             ],
             'meta' => [
                 'current_page' => $reviews->currentPage(),
@@ -71,6 +72,33 @@ class ReviewController extends Controller
                 'per_page' => $reviews->perPage(),
                 'total' => $reviews->total(),
             ],
+        ]);
+    }
+
+    /**
+     * Lightweight rating refresh from Yandex (no review fetch).
+     */
+    public function refreshRating(Request $request): JsonResponse
+    {
+        $source = $request->user()->yandexSources()->latest()->first();
+
+        if (!$source) {
+            return response()->json(['rating' => null, 'total_reviews' => 0]);
+        }
+
+        $result = $this->yandexService->fetchRating($source);
+
+        if ($result) {
+            return response()->json([
+                'rating' => $result['rating'],
+                'total_reviews' => $result['total_reviews'],
+            ]);
+        }
+
+        // Fallback: return stored values
+        return response()->json([
+            'rating' => $source->rating,
+            'total_reviews' => max($source->total_reviews, $source->reviews()->count()),
         ]);
     }
 

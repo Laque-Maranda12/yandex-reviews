@@ -44,9 +44,18 @@ class ReviewController extends Controller
             $sortDirection = 'desc';
         }
 
-        $reviews = $source->reviews()
-            ->orderBy($sortField, $sortDirection)
-            ->paginate($perPage);
+        $query = $source->reviews();
+
+        if ($sortField === 'rating') {
+            // Push reviews without rating (NULL) to the end regardless of sort direction,
+            // so they don't pollute the "low rating" or "high rating" views.
+            $query->orderByRaw('CASE WHEN rating IS NULL THEN 1 ELSE 0 END')
+                  ->orderBy('rating', $sortDirection);
+        } else {
+            $query->orderBy($sortField, $sortDirection);
+        }
+
+        $reviews = $query->paginate($perPage);
 
         $rating = $source->rating;
         $dbCount = $source->reviews()->count();
